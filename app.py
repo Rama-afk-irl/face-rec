@@ -11,7 +11,7 @@ import io
 
 class FaceManager:
 
-    def __init__(self, db_path='chatbot_data.db'):
+    def __init__(self, db_path='data/chatbot_data.db'):
         self.db_path = db_path
         self._initialize_database()
         
@@ -134,9 +134,9 @@ except Exception as e:
     st.info("Please ensure your GOOGLE_API_KEY is set correctly in your .env file or deployment secrets.")
     st.stop()
 
-@st.singleton
+@st.cache_resource
 def get_face_manager():
-    return FaceManager()
+    return FaceManager(db_path='data/chatbot_data.db)
 
 face_manager = get_face_manager()
 
