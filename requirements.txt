@@ -1,0 +1,9 @@
+streamlit
+requests
+pillow
+python-dotenv
+google-generativeai
+numpy
+faiss-cpu
+face-recognition
+dlib
