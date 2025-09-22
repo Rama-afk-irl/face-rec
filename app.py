@@ -1,3 +1,5 @@
+# app.py (All-in-One, updated with deepface)
+
 import streamlit as st
 from PIL import Image
 import os
@@ -6,32 +8,35 @@ import google.generativeai as genai
 import sqlite3
 import numpy as np
 import faiss
-import face_recognition
 import io
 
-class FaceManager:
+# NEW: Import deepface
+from deepface import DeepFace
 
-    def __init__(self, db_path='data/chatbot_data.db'):
+# --- Part 1: Backend Logic (FaceManager Class) ---
+
+class FaceManager:
+    """ Manages all facial recognition using the lightweight deepface library. """
+    def __init__(self, db_path='chatbot_data.db'):
         self.db_path = db_path
         self._initialize_database()
         
         self.known_face_encodings = []
         self.known_face_ids = []
         
-       
-        self.index = faiss.IndexFlatL2(128) 
+        # We will use the 'Facenet' model, which produces 128-dimensional embeddings
+        self.model_name = 'Facenet'
+        self.index = faiss.IndexFlatL2(128)
         self.index = faiss.IndexIDMap(self.index)
         
         self._load_known_faces()
 
     def _get_db_connection(self):
-        """Establishes a connection to the SQLite database."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _initialize_database(self):
-        """Creates the 'known_faces' table if it doesn't already exist."""
         conn = self._get_db_connection()
         cursor = conn.cursor()
         cursor.execute('''
@@ -42,41 +47,37 @@ class FaceManager:
         )''')
         conn.commit()
         conn.close()
-        print("Database initialized and 'known_faces' table is ready.")
+        print("Database initialized.")
 
     def _load_known_faces(self):
-        """Loads all known faces from the database into the in-memory FAISS index."""
         conn = self._get_db_connection()
         cursor = conn.execute('SELECT id, embedding FROM known_faces')
-        
-        encodings = []
-        ids = []
-        
+        encodings, ids = [], []
         for row in cursor:
-            embedding = np.frombuffer(row['embedding'], dtype=np.float64)
+            embedding = np.frombuffer(row['embedding'], dtype=np.float32)
             encodings.append(embedding)
             ids.append(row['id'])
-            
         conn.close()
         
         if len(ids) > 0:
-            self.known_face_encodings = np.array(encodings)
+            self.known_face_encodings = np.array(encodings, dtype=np.float32)
             self.known_face_ids = np.array(ids)
             self.index.add_with_ids(self.known_face_encodings, self.known_face_ids)
-            print(f"Loaded {len(self.known_face_ids)} known faces into memory.")
+            print(f"Loaded {len(self.known_face_ids)} known faces.")
 
     def add_face(self, image_bytes, name):
-        """Finds a face in an image, creates an embedding, and saves it."""
+        """ UPDATED: Uses deepface to find a face and save its embedding. """
         try:
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            image_np = np.array(image)
-            face_encodings = face_recognition.face_encodings(image_np)
+            # DeepFace works with image file paths, so we save bytes to a temp file
+            with open("temp_face.jpg", "wb") as f:
+                f.write(image_bytes)
             
-            if not face_encodings:
-                return False, "No face found in the image."
-            
-            new_encoding = face_encodings[0]
-            
+            # Generate embedding using deepface
+            embedding_objs = DeepFace.represent(img_path="temp_face.jpg", model_name=self.model_name, enforce_detection=True)
+            new_encoding = np.array(embedding_objs[0]['embedding'], dtype=np.float32)
+
+            os.remove("temp_face.jpg") # Clean up the temp file
+
             conn = self._get_db_connection()
             cursor = conn.execute(
                 'INSERT INTO known_faces (name, embedding) VALUES (?, ?)',
@@ -87,29 +88,38 @@ class FaceManager:
             conn.close()
             
             self.index.add_with_ids(np.array([new_encoding]), np.array([new_id]))
-            
             return True, f"Successfully added {name}."
+        except ValueError:
+            os.remove("temp_face.jpg")
+            return False, "No face found or multiple faces detected. Please use a clear picture of one person."
         except Exception as e:
+            if os.path.exists("temp_face.jpg"):
+                os.remove("temp_face.jpg")
             return False, f"An error occurred: {e}"
 
     def recognize_faces(self, image_bytes):
-        """Recognizes faces in a new image by searching the FAISS index."""
+        """ UPDATED: Uses deepface to recognize faces in a new image. """
         try:
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            image_np = np.array(image)
-            unknown_encodings = face_recognition.face_encodings(image_np)
-            
-            if not unknown_encodings:
-                return []
-            
-            distances, ids = self.index.search(np.array(unknown_encodings), k=1)
-            
+            with open("temp_rec.jpg", "wb") as f:
+                f.write(image_bytes)
+
+            # Find all faces in the image and get their embeddings
+            embedding_objs = DeepFace.represent(img_path="temp_rec.jpg", model_name=self.model_name, enforce_detection=False)
+            os.remove("temp_rec.jpg")
+
             recognized_names = []
             conn = self._get_db_connection()
             
-            for i, d in enumerate(distances):
-                if d[0] < 0.6:
-                    matched_id = ids[i][0]
+            for obj in embedding_objs:
+                if not obj['face_confidence'] > 0.9: # Skip low-confidence detections
+                    continue
+                
+                unknown_encoding = np.array([obj['embedding']], dtype=np.float32)
+                distances, ids = self.index.search(unknown_encoding, k=1)
+                
+                # NOTE: The distance threshold for Facenet is different. ~1.1 is a good start.
+                if ids[0][0] != -1 and distances[0][0] < 1.1:
+                    matched_id = ids[0][0]
                     cursor = conn.execute('SELECT name FROM known_faces WHERE id = ?', (int(matched_id),))
                     row = cursor.fetchone()
                     if row and row['name'] not in recognized_names:
@@ -118,28 +128,30 @@ class FaceManager:
             conn.close()
             return recognized_names
         except Exception as e:
+            if os.path.exists("temp_rec.jpg"):
+                os.remove("temp_rec.jpg")
             print(f"Error during recognition: {e}")
             return []
 
+# --- Part 2: Streamlit UI (No changes needed here, it remains the same) ---
+
+# Load API Key
 load_dotenv()
 try:
-    
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY not found in environment variables or secrets.")
+        raise ValueError("GOOGLE_API_KEY not found.")
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception as e:
     st.error(f"🔴 Error initializing Google AI: {e}")
-    st.info("Please ensure your GOOGLE_API_KEY is set correctly in your .env file or deployment secrets.")
     st.stop()
 
-@st.cache_resource
+@st.singleton
 def get_face_manager():
-    return FaceManager(db_path='data/chatbot_data.db)
+    return FaceManager()
 
 face_manager = get_face_manager()
-
 
 st.set_page_config(page_title="AI Vision & Chat", layout="wide")
 st.title("🧠 AI Vision Bot")
@@ -147,7 +159,7 @@ st.caption("Teach the bot who people are in the sidebar, then have a conversatio
 
 with st.sidebar:
     st.header("Teach the Bot")
-    st.info("Upload a clear picture of ONE person and enter their name to add them to the bot's memory.")
+    st.info("Upload a clear picture of ONE person.")
     teach_image = st.file_uploader("Upload Image", type=["jpg", "jpeg", "png"], key="teach_image")
     person_name = st.text_input("Person's Name", key="person_name")
     
@@ -172,6 +184,7 @@ if "chat_session" not in st.session_state:
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
+        # Handle complex content (text + image)
         if isinstance(message["content"], list):
             for part in message["content"]:
                 if isinstance(part, str):
@@ -202,7 +215,7 @@ if prompt := st.chat_input("Ask a question about the image or just chat..."):
             st.markdown(prompt)
             st.image(pil_image, width=200)
         
-    else: 
+    else:
         user_prompt_parts = [prompt]
         with st.chat_message("user"):
             st.markdown(prompt)
