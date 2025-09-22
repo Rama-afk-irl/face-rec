@@ -5,5 +5,5 @@ python-dotenv
 google-generativeai
 numpy
 faiss-cpu
-face-recognition
-dlib
+deepface
+opencv-python-headless
